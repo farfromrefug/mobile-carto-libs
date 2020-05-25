@@ -713,6 +713,16 @@ namespace carto { namespace vt {
     cglib::mat4x4<float> GLTileRenderer::calculateTileMVPMatrix(const TileId& tileId, float coordScale) const {
         return cglib::mat4x4<float>::convert(_cameraProjMatrix * calculateTileMatrix(tileId, coordScale));
     }
+
+    cglib::vec2<float> GLTileRenderer::getLatRange(const TileId& id) const {
+        const double n = consts::PI - 2.0 * consts::PI * id.y / std::pow(2.0, id.zoom);
+        double latitude1 = consts::RAD_TO_DEG * std::atan(0.5 * (std::exp(n) - std::exp(-n)));
+        const TileId id2 = TileId(id.zoom, id.x, id.y + 1);
+        
+        const double n2 = consts::PI - 2.0 * consts::PI * id2.y / std::pow(2.0, id2.zoom);
+        double latitude2 = consts::RAD_TO_DEG * std::atan(0.5 * (std::exp(n2) - std::exp(-n2)));
+        return cglib::vec2<float>(latitude1, latitude2);
+    }
     
     float GLTileRenderer::calculateBlendNodeOpacity(const BlendNode& blendNode, float blend) const {
         float opacity = blend * blendNode.blend;
@@ -1390,6 +1400,9 @@ namespace carto { namespace vt {
             cglib::mat4x4<float> mvpMatrix = cglib::mat4x4<float>::convert(_cameraProjMatrix * cglib::translate4_matrix(_tileSurfaceBuilderOrigin));
             glUniformMatrix4fv(shaderProgram.uniforms[U_MVPMATRIX], 1, GL_FALSE, mvpMatrix.data());
 
+            cglib::vec2<float> latrange = getLatRange(targetTileId.zoom > tileId.zoom ? targetTileId : tileId);
+            glUniform2f(shaderProgram.uniforms[U_LATRANGE], latrange(0), latrange(1));
+
             const CompiledBitmap& compiledTileBitmap = buildCompiledTileBitmap(bitmap);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, compiledTileBitmap.texture);
@@ -1945,7 +1958,7 @@ namespace carto { namespace vt {
                 throw std::runtime_error("Shader program linking failed: " + msg);
             }
         }
-        catch (const std::exception&) {
+        catch (const std::exception& e) {
             deleteShaderProgram(shaderProgram);
             if (vertexShader != 0) {
                 glDeleteShader(vertexShader);

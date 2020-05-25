@@ -39,7 +39,8 @@ namespace carto { namespace vt {
         U_HALFRESOLUTION,
         U_INVSCREENSIZE,
         U_DERIVSCALE,
-        U_GAMMA
+        U_GAMMA,
+        U_LATRANGE
     };
 
     static const std::map<std::string, int> attribMap = {
@@ -73,7 +74,8 @@ namespace carto { namespace vt {
         { "uHalfResolution",   U_HALFRESOLUTION },
         { "uInvScreenSize",    U_INVSCREENSIZE },
         { "uDerivScale",       U_DERIVSCALE },
-        { "uGamma",            U_GAMMA }
+        { "uGamma",            U_GAMMA },
+        { "uLatrange",        U_LATRANGE }
     };
 
     static const std::string commonVsh = R"GLSL(
@@ -158,6 +160,7 @@ namespace carto { namespace vt {
         attribute vec2 aVertexUV;
         uniform mat4 uMVPMatrix;
         uniform mat3 uUVMatrix;
+        uniform highp vec2 uLatrange;
         varying mediump vec2 vUV;
         #ifdef LIGHTING_VSH
         varying lowp vec4 vColor;
@@ -166,7 +169,7 @@ namespace carto { namespace vt {
         void main(void) {
             vUV = vec2(uUVMatrix * vec3(aVertexUV, 1.0));
         #ifdef LIGHTING_VSH
-            vColor = applyLighting(vec4(1.0, 1.0, 1.0, 1.0), aVertexNormal);
+            vColor = applyLighting(vUV, vec4(1.0, 1.0, 1.0, 1.0), aVertexNormal, uLatrange);
         #endif
         #ifdef LIGHTING_FSH
             vNormal = aVertexNormal;
@@ -178,17 +181,19 @@ namespace carto { namespace vt {
     static const std::string bitmapFsh = R"GLSL(
         uniform sampler2D uBitmap;
         uniform lowp float uOpacity;
+        uniform highp vec2 uLatrange;
         varying mediump vec2 vUV;
         #ifdef LIGHTING_VSH
         varying lowp vec4 vColor;
         #endif
+        varying vec2 v_pos;
 
         void main(void) {
             lowp vec4 color = texture2D(uBitmap, vUV);
         #ifdef LIGHTING_VSH
             gl_FragColor = vColor * color * uOpacity;
         #elif defined(LIGHTING_FSH)
-            gl_FragColor = applyLighting(color, normalize(vNormal)) * uOpacity;
+            gl_FragColor = applyLighting(vUV, color, normalize(vNormal), uLatrange, uBitmap) * uOpacity;
         #else
             gl_FragColor = color * uOpacity;
         #endif

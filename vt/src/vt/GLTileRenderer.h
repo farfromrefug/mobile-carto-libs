@@ -38,6 +38,11 @@
 namespace carto { namespace vt {
     class LabelCuller;
 
+    namespace consts {
+        static constexpr double PI = 3.1415926535897932;
+        static constexpr double RAD_TO_DEG = 57.295779513082323;
+    }
+
     class GLTileRenderer final {
     public:
         struct LightingShader {
@@ -176,6 +181,8 @@ namespace carto { namespace vt {
         cglib::mat4x4<double> calculateTileMatrix(const TileId& tileId, float coordScale = 1.0f) const;
         cglib::mat3x3<double> calculateTileMatrix2D(const TileId& tileId, float coordScale = 1.0f) const;
         cglib::mat4x4<float> calculateTileMVPMatrix(const TileId& tileId, float coordScale = 1.0f) const;
+
+        cglib::vec2<float> getLatRange(const TileId& id) const;
 
         float calculateBlendNodeOpacity(const BlendNode& blendNode, float blend) const;
         
