@@ -535,7 +535,7 @@ namespace massif::vt {
     }
 
     TileLayerBuilder::SpanVertexInfo TileLayerBuilder::spanInfoForRing(const Vertices& ring, long long id, float baseOffset) {
-        auto ends = SpanGeometry::farthestPair(ring);
+        auto ends = SpanGeometry::endCentres(ring);
         const Vertex& p0 = ends.first;
         const Vertex& p1 = ends.second;
         SpanVertexInfo info;

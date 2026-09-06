@@ -4395,10 +4395,6 @@ namespace massif::vt {
         // gives a different chord per geometry.
         std::map<int, std::vector<SpanPiece>> piecesByZoom;
         std::set<const Tile*> visited;
-        _spanSampleZoom = 0;
-        for (const TileId& tileId : _visibleTileIds) {
-            _spanSampleZoom = std::max(_spanSampleZoom, tileId.zoom);
-        }
         // The reference tiles first: at the source's max zoom they hold a piece UNCUT by the
         // overzoomed targets on screen, and the visited set then skips a visible tile that is
         // the same object.
@@ -4463,28 +4459,8 @@ namespace massif::vt {
             }
         };
 
-        // Remember a resolved chord, and lend it back to a piece whose far end has left the view -
-        // or was never in it: the coarser reference tiles the owner fetches for a stranded piece
-        // (collectUnresolvedSpanEnds) resolve here too, and the zoom groups below run coarsest
-        // first, so their chord is in the cache by the time the fine pieces look for one.
-        // 512: a city view holds a chord per structure per zoom group, and at 64 the cache
-        // evicted chords the pieces on screen still borrowed, so they went stranded again.
-        constexpr std::size_t MAX_CACHED_CHORDS = 512;
-        auto rememberChord = [this](const cglib::vec2<double>& portal0, const cglib::vec2<double>& portal1) {
-            for (CachedChord& chord : _spanChordCache) {
-                if (chord.portal0 == portal0 && chord.portal1 == portal1) {
-                    chord.stamp = ++_spanChordClock;
-                    return;
-                }
-            }
-            if (_spanChordCache.size() >= MAX_CACHED_CHORDS) {
-                auto oldest = std::min_element(_spanChordCache.begin(), _spanChordCache.end(),
-                    [](const CachedChord& a, const CachedChord& b) { return a.stamp < b.stamp; });
-                _spanChordCache.erase(oldest);
-            }
-            _spanChordCache.push_back(CachedChord { portal0, portal1, ++_spanChordClock });
-        };
         std::vector<std::pair<int, cglib::vec2<double>>> unresolvedEnds;
+        _spanCullSerial++;
 
         std::map<SpanPieceKey, SpanUnion> spanUnions;
         for (auto it = piecesByZoom.begin(); it != piecesByZoom.end(); it++) {
@@ -4576,18 +4552,18 @@ namespace massif::vt {
                     // with a portal: a piece in the middle of a long bridge is cut at both ends and
                     // has no portal to offer, and those are exactly the pieces left stranded when
                     // the far end of the deck is off screen and its tiles are gone.
-                    auto chordIt = SpanGeometry::borrowChord(pieces[i].e0, pieces[i].portal0, pieces[i].e1, pieces[i].portal1, _spanChordCache.begin(), _spanChordCache.end());
+                    auto chordIt = SpanGeometry::borrowChord(pieces[i].e0, pieces[i].portal0, pieces[i].e1, pieces[i].portal1, _spanChordCache.begin(), _spanChordCache.end(),
+                                                             [](auto it) -> const CachedChord& { return it->second; });
                     if (chordIt != _spanChordCache.end()) {
-                        span.portal0 = chordIt->portal0;
-                        span.portal1 = chordIt->portal1;
+                        span.portal0 = chordIt->second.portal0;
+                        span.portal1 = chordIt->second.portal1;
                         span.have0 = span.have1 = true;
-                        span.haveHeights = false; // resolved below, against this zoom's elevation
                     }
                 }
                 span.zoom = pieces[i].key.tileId.zoom;
-                if (span.have0 && span.have1) {
-                    rememberChord(span.portal0, span.portal1);
-                } else {
+                // Remembered AFTER the merge below, winners only: stamped here, every copy's chord
+                // read as an incumbent and the merge had nothing to prefer.
+                if (!span.have0 || !span.have1) {
                     // Still no chord: name the tiles its far ends are in, for the owner to fetch.
                     if (!pieces[i].portal0) {
                         unresolvedEnds.emplace_back(span.zoom, SpanGeometry::beyondCutEnd(pieces[i].e0, pieces[i].e1, span.zoom));
@@ -4596,6 +4572,7 @@ namespace massif::vt {
                         unresolvedEnds.emplace_back(span.zoom, SpanGeometry::beyondCutEnd(pieces[i].e1, pieces[i].e0, span.zoom));
                     }
                 }
+                span.line = (pieces[i].key.type == TileGeometry::Type::LINE);
                 spanUnions[pieces[i].key] = span;
             }
         }
@@ -4617,7 +4594,34 @@ namespace massif::vt {
                     resolved.push_back(&it->second);
                 }
             }
-            std::stable_sort(resolved.begin(), resolved.end(), [](const SpanUnion* a, const SpanUnion* b) {
+            // A ROAD's chord first, whatever the lengths: its portals are the feature's ends, on
+            // the road, where the approach is draped. A deck polygon's are its ring's two farthest
+            // corners, which overhang the quay or the bank, and being the longer chord it won the
+            // merge - the road on it then read the bank's height, a deck sitting a metre or two
+            // under its own approaches (Petit-Pont, 2026-09-06).
+            // ...and before either, a chord the cache already holds WITH heights: the copies of one
+            // bridge at z18, z19 and z20 give three chords metres apart, which set is present
+            // changes with the zoom, and longest-first crowned a different one each cull - the
+            // deck jumped between their heights on every zoom step (Pont au Double: three chords
+            // over one zoom in and out). The incumbent stays as long as any piece adopts it, since
+            // the adoption refreshes its entry.
+            // Among incumbents the one used LAST cull, by its stamp: two incumbents of the same
+            // structure would otherwise alternate by length as their pieces come and go.
+            auto incumbent = [this](const SpanUnion* span) -> std::uint64_t {
+                auto it = _spanChordCache.find(chordKey(span->portal0, span->portal1));
+                return it != _spanChordCache.end() && it->second.haveHeights ? it->second.stamp : 0;
+            };
+            std::stable_sort(resolved.begin(), resolved.end(), [&incumbent](const SpanUnion* a, const SpanUnion* b) {
+                if (a->line != b->line) {
+                    return a->line;
+                }
+                std::uint64_t ia = incumbent(a), ib = incumbent(b);
+                if ((ia != 0) != (ib != 0)) {
+                    return ia != 0;
+                }
+                if (ia != ib) {
+                    return ia > ib;
+                }
                 return cglib::norm(a->portal1 - a->portal0) > cglib::norm(b->portal1 - b->portal0);
             });
             std::vector<SpanUnion*> merged;
@@ -4655,45 +4659,31 @@ namespace massif::vt {
         // Resolve the chord heights NOW, not when the geometry is drawn. Labels are re-anchored in
         // startFrame, before any geometry resolves, so a chord without heights sent every label on
         // a bridge back to the terrain - and nothing made them dirty again once the heights landed.
+        // Per CHORD, on its cache entry: every piece on it reads the same pair, and a pair that
+        // did not resolve this time (a portal's DEM tile off screen, or not yet drawn) keeps what
+        // the chord had rather than hiding the deck.
         bool gainedHeights = false;
-        if (_extrusionElevationProvider) {
-            for (auto it = spanUnions.begin(); it != spanUnions.end(); it++) {
-                SpanUnion& span = it->second;
-                if (!span.have0 || !span.have1 || span.haveHeights) {
-                    continue;
-                }
-                double h0 = 0, h1 = 0;
-                // The drawn surface (not the smoothed field a building's base uses): the approach
-                // road is draped on it, and the deck has to meet that road. At _spanSampleZoom for
-                // EVERY piece: sampled at the piece's own zoom, one chord read two ground heights
-                // (Pont Neuf z21.2: 1.345 on 22 pieces, 1.306 on 22 more) and stepped at the cut.
-                if (_extrusionElevationProvider(cglib::vec3<double>(span.portal0(0), span.portal0(1), 0), _spanSampleZoom, false, h0)
-                 && _extrusionElevationProvider(cglib::vec3<double>(span.portal1(0), span.portal1(1), 0), _spanSampleZoom, false, h1)) {
-                    span.height0 = h0;
-                    span.height1 = h1;
-                    span.haveHeights = true;
-                    gainedHeights = true;
-                }
-            }
-        }
-
-        // Fresh heights replace the old ones - a finer DEM landing, or the sample zoom moving with
-        // the view, moves the deck with the surface it must meet. A pair that did NOT resolve this
-        // time keeps what it had: its far portal's tile may just have left the cache, and dropping
-        // the height would hide the deck for a frame.
         bool changed = (spanUnions != _spanUnions);
         for (auto it = spanUnions.begin(); it != spanUnions.end(); it++) {
-            auto oldIt = _spanUnions.find(it->first);
-            if (oldIt == _spanUnions.end() || !oldIt->second.haveHeights) {
+            SpanUnion& span = it->second;
+            if (!span.have0 || !span.have1) {
                 continue;
             }
-            SpanUnion& span = it->second;
-            const SpanUnion& old = oldIt->second;
-            if (!span.haveHeights) {
-                span.height0 = old.height0;
-                span.height1 = old.height1;
-                span.haveHeights = true;
-            } else if (span.height0 != old.height0 || span.height1 != old.height1) {
+            CachedChord& chord = rememberChord(span.portal0, span.portal1);
+            bool had = chord.haveHeights;
+            // Once per cull per chord: the unions run coarsest tile first, so a portal off screen
+            // is read at the coarsest piece's zoom, where its DEM is likeliest to be cached.
+            bool sampled = chord.sampledCull == _spanCullSerial ? chord.haveHeights : sampleChordHeights(chord, span.zoom);
+            chord.sampledCull = _spanCullSerial;
+            if (sampled && !had) {
+                gainedHeights = true;
+            }
+            span.height0 = chord.height0;
+            span.height1 = chord.height1;
+            span.haveHeights = chord.haveHeights;
+            auto oldIt = _spanUnions.find(it->first);
+            if (oldIt == _spanUnions.end() || oldIt->second.haveHeights != span.haveHeights
+             || oldIt->second.height0 != span.height0 || oldIt->second.height1 != span.height1) {
                 changed = true;
             }
         }
@@ -4705,6 +4695,70 @@ namespace massif::vt {
         if (gainedHeights) {
             _pendingLabelElevationAll = true; // a deck a label could not reach before
         }
+    }
+
+    GLTileRenderer::CachedChord& GLTileRenderer::rememberChord(const cglib::vec2<double>& portal0, const cglib::vec2<double>& portal1) {
+        // Remember a resolved chord, and lend it back to a piece whose far end has left the view -
+        // or was never in it: the coarser reference tiles the owner fetches for a stranded piece
+        // (collectUnresolvedSpanEnds) resolve here too, and the zoom groups run coarsest first, so
+        // their chord is in the cache by the time the fine pieces look for one.
+        // Bounded well above what a view holds (measured 1200+ chorded pieces over Paris at
+        // z16 tilt 35): an evicted chord comes back without its heights.
+        constexpr std::size_t MAX_CACHED_CHORDS = 4096;
+        auto it = _spanChordCache.find(chordKey(portal0, portal1));
+        if (it != _spanChordCache.end()) {
+            it->second.stamp = ++_spanChordClock;
+            return it->second;
+        }
+        if (_spanChordCache.size() >= MAX_CACHED_CHORDS) {
+            auto oldest = std::min_element(_spanChordCache.begin(), _spanChordCache.end(),
+                [](const auto& a, const auto& b) { return a.second.stamp < b.second.stamp; });
+            _spanChordCache.erase(oldest);
+        }
+        CachedChord chord;
+        chord.portal0 = portal0;
+        chord.portal1 = portal1;
+        chord.stamp = ++_spanChordClock;
+        return _spanChordCache.emplace(chordKey(portal0, portal1), chord).first->second;
+    }
+
+    int GLTileRenderer::spanSampleZoomAt(const cglib::vec2<double>& pos, int fallbackZoom) const {
+        // The tile drawn under the portal is the one whose DEM level the approach road is draped
+        // with, and the deck has to meet that road. The finest of them when a stand-in parent is
+        // still up beside its children. Off screen there is no road to meet, and the finest
+        // visible zoom asked for a lidar tile 8 km from the camera that no one had loaded.
+        int zoom = -1;
+        for (const TileId& tileId : _visibleTileIds) {
+            if (tileId.zoom <= zoom) {
+                continue;
+            }
+            int extent = 1 << tileId.zoom;
+            int x = static_cast<int>(std::floor((pos(0) + 0.5) * extent));
+            int y = static_cast<int>(std::floor((0.5 - pos(1)) * extent));
+            if (((tileId.x - x) % extent) == 0 && tileId.y == y) {
+                zoom = tileId.zoom;
+            }
+        }
+        return zoom >= 0 ? zoom : fallbackZoom;
+    }
+
+    bool GLTileRenderer::sampleChordHeights(CachedChord& chord, int pieceZoom) const {
+        if (!_extrusionElevationProvider) {
+            return false;
+        }
+        // The drawn surface (not the smoothed field a building's base uses), each portal at its
+        // own tile's zoom. Re-read every time - a finer DEM landing moves the road the deck must
+        // meet - and kept as it was when a portal's DEM is not there.
+        double h0 = 0, h1 = 0;
+        if (!_extrusionElevationProvider(cglib::vec3<double>(chord.portal0(0), chord.portal0(1), 0), spanSampleZoomAt(chord.portal0, pieceZoom), false, h0)
+         || !_extrusionElevationProvider(cglib::vec3<double>(chord.portal1(0), chord.portal1(1), 0), spanSampleZoomAt(chord.portal1, pieceZoom), false, h1)) {
+            return false;
+        }
+        chord.height0 = h0;
+        chord.height1 = h1;
+        chord.haveHeights = true;
+        chord.baseVersion = _extrusionBaseVersion.load(std::memory_order_relaxed);
+        return true;
     }
 
     void GLTileRenderer::markPendingLabelsDirty() {
@@ -4740,6 +4794,10 @@ namespace massif::vt {
         // POIs and one-way arrows are all symbols, so they all come through here.
         if (_spanChords.empty()) {
             return _labelElevationProvider;
+        }
+        // Rebuilt when the ground moved since: the entries were re-read by the pieces on them.
+        if (_spanChordsBaseVersion != _extrusionBaseVersion.load(std::memory_order_relaxed)) {
+            rebuildSpanChords();
         }
         // A copy of the chords and the provider: the sampler outlives the lock it was made under.
         std::vector<SpanChord> chords = _spanChords;
@@ -4781,6 +4839,7 @@ namespace massif::vt {
     }
 
     void GLTileRenderer::rebuildSpanChords() const {
+        _spanChordsBaseVersion = _extrusionBaseVersion.load(std::memory_order_relaxed);
         _spanChords.clear();
         for (auto it = _spanUnions.begin(); it != _spanUnions.end(); it++) {
             const SpanUnion& span = it->second;
@@ -4802,6 +4861,13 @@ namespace massif::vt {
             chord.portal1 = span.portal1;
             chord.height0 = span.height0;
             chord.height1 = span.height1;
+            // The entry's pair when it has one: the union's copy is what the cull saw, the entry
+            // is re-read every ramp frame by the pieces on it.
+            auto entryIt = _spanChordCache.find(chordKey(span.portal0, span.portal1));
+            if (entryIt != _spanChordCache.end() && entryIt->second.haveHeights) {
+                chord.height0 = entryIt->second.height0;
+                chord.height1 = entryIt->second.height1;
+            }
             // The bounds isOnChord could ever accept: the portals, out by the match allowance.
             double allowance = SpanGeometry::matchAllowance(cglib::length(span.portal1 - span.portal0));
             cglib::vec2<double> margin(allowance, allowance);
@@ -4848,17 +4914,13 @@ namespace massif::vt {
         cglib::mat3x3<double> tileMatrix = calculateTileMatrix2D(sourceTileId, 1.0f);
         std::size_t vertexCount = vertexGeometry.size() / params.vertexSize;
         bool allResolved = true;
-        // A record's baseOffset is in metres and the chord in internal z units: the same factor
-        // the vertex shader applies to a DEM sample (metres to world z at the equator, then the
-        // mercator stretch at the vertex's own latitude), from any tile's elevation texture - the
-        // factor is the projection's, not the tile's.
+        // A record's baseOffset is in metres and the chord in internal z units: metres to world z
+        // at the equator, then the mercator stretch at the vertex's own latitude. WITHOUT the
+        // exaggeration, unlike a DEM sample: the offset is a thickness the shader adds back
+        // unexaggerated (aVertexHeight * uHeightScale), so taken from the terrain texture's scale
+        // the two cancelled only at exaggeration 1 - during the flatten ramp the base sank with the
+        // ground while the 7 m of deck above it did not, and the deck rose as the terrain fell.
         double metersToInternal = _metersToInternal;
-        {
-            const std::pair<bool, TerrainTexture>& resolved = resolveTerrainTexture(sourceTileId);
-            if (resolved.first && resolved.second.metersToInternal > 0) {
-                metersToInternal = resolved.second.metersToInternal;
-            }
-        }
         auto baseOffsetAt = [&](const cglib::vec2<double>& w, float metres) -> double {
             return metres * metersToInternal * std::cosh(6.283185307179586 * w(1)); // 2 pi: normalized world y to the mercator angle
         };
@@ -4869,31 +4931,94 @@ namespace massif::vt {
         // down to the valley floor: the deck fans out across half the screen. A line has no such
         // vertices, so this only ever widens the patch for a deck.
         std::vector<bool> patched(vertexCount, false);
-        for (const TileGeometry::SpanRecord& record : spanRecords) {
+        // A piece drawn from a tile no longer in the set - a render tile retained while its
+        // replacement loads - has no union this cull. Its bases from the last resolve are still in
+        // the vertices and still right, so it keeps them rather than hiding for the hold: that was
+        // the deck vanishing on every zoom step (measured 224 such records in a frame).
+        bool wasResolved = geometry->isBaseResolved();
+        // A chord whose re-read failed this frame draws on its last pair but is asked again next
+        // frame: the flat state drops the DEM, and during the rise every read failed and the pair
+        // kept was the flattened ZERO - the deck stayed on the water after the ground came back.
+        bool retry = false;
+        for (std::size_t recordIndex = 0; recordIndex < spanRecords.size(); recordIndex++) {
+            const TileGeometry::SpanRecord& record = spanRecords[recordIndex];
             auto it = _spanUnions.find(SpanPieceKey { sourceTileId, record.featureId, record.vertexOffset, geometry->getType() });
+            // A piece the cull did not chord - no union, since its tile is a stand-in or a retained
+            // one outside the set, or a group that lacked a portal - borrows from the chord cache by
+            // its own ends here, as the cull's stranded pieces do: a chord another zoom group
+            // resolved later in the same pass, or one from an earlier cull, is there by now.
+            const SpanUnion* union_ = (it != _spanUnions.end() && it->second.have0 && it->second.have1) ? &it->second : nullptr;
+            SpanUnion borrowed;
+            // The chord this record stood on last time, first: its entry is still read every ramp
+            // frame, which is what keeps a retained piece moving with the ground.
+            if (!union_) {
+                const TileGeometry::SpanChordRef& ref = geometry->getSpanRecordChord(recordIndex);
+                if (ref.valid) {
+                    borrowed.portal0 = ref.portal0;
+                    borrowed.portal1 = ref.portal1;
+                    borrowed.have0 = borrowed.have1 = true;
+                    union_ = &borrowed;
+                }
+            }
+            if (!union_) {
+                cglib::vec2<double> e0 = cglib::transform_point(cglib::vec2<double>(record.p0(0), 1.0 - record.p0(1)), tileMatrix);
+                cglib::vec2<double> e1 = cglib::transform_point(cglib::vec2<double>(record.p1(0), 1.0 - record.p1(1)), tileMatrix);
+                auto chordIt = SpanGeometry::borrowChord(e0, record.portal0, e1, record.portal1, _spanChordCache.begin(), _spanChordCache.end(),
+                                                         [](auto it) -> const CachedChord& { return it->second; });
+                if (chordIt != _spanChordCache.end() && chordIt->second.haveHeights) {
+                    borrowed.portal0 = chordIt->second.portal0;
+                    borrowed.portal1 = chordIt->second.portal1;
+                    borrowed.have0 = borrowed.have1 = true;
+                    borrowed.height0 = chordIt->second.height0;
+                    borrowed.height1 = chordIt->second.height1;
+                    borrowed.haveHeights = true;
+                    union_ = &borrowed;
+                }
+            }
             // Both portals or nothing: a chord to a tile CUT dives to whatever the ground does
             // there, which is worse than draping. Missing pieces resolve on a later frame.
-            if (it == _spanUnions.end() || !it->second.have0 || !it->second.have1) {
-                allResolved = false;
+            if (!union_) {
+                if (!wasResolved) {
+                    allResolved = false;
+                    continue;
+                }
+                for (std::size_t i = record.vertexOffset; i < std::min(vertexCount, record.vertexOffset + record.vertexCount); i++) {
+                    patched[i] = true;
+                }
                 continue;
             }
-            const cglib::vec2<double>& w0 = it->second.portal0;
-            const cglib::vec2<double>& w1 = it->second.portal1;
+            const cglib::vec2<double>& w0 = union_->portal0;
+            const cglib::vec2<double>& w1 = union_->portal1;
+            geometry->setSpanRecordChord(recordIndex, w0, w1);
             // The ground AT the junction, which is where the approach road is drawn: that road is
             // draped, so it sits on the DEM there, and anchoring the deck to the same value is what
             // makes the two meet instead of stepping. Usually already resolved when the union was
             // built - labels need it a pass earlier than this - so this is the late arrival.
-            double h0 = it->second.height0, h1 = it->second.height1;
-            if (!it->second.haveHeights) {
-                if (!_extrusionElevationProvider(cglib::vec3<double>(w0(0), w0(1), 0), _spanSampleZoom, false, h0)
-                 || !_extrusionElevationProvider(cglib::vec3<double>(w1(0), w1(1), 0), _spanSampleZoom, false, h1)) {
-                    allResolved = false;
-                    continue;
+            double h0 = union_->height0, h1 = union_->height1;
+            // The pair comes from the chord's cache entry, which outlives this piece's union and
+            // is shared by every piece on the chord: the union's copy is only what the cull saw.
+            // Read again when the elevation version moved (the ground itself: a DEM landing, an
+            // exaggeration ramp), keeping the last pair if the read fails - and retrying.
+            auto chordIt = _spanChordCache.find(chordKey(w0, w1));
+            bool haveChord = false;
+            if (chordIt != _spanChordCache.end()) {
+                if (chordIt->second.baseVersion != version && !sampleChordHeights(chordIt->second, sourceTileId.zoom)) {
+                    retry = true;
                 }
-                it->second.height0 = h0;
-                it->second.height1 = h1;
-                it->second.haveHeights = true;
-                rebuildSpanChords();
+                haveChord = chordIt->second.haveHeights;
+            }
+            if (haveChord) {
+                h0 = chordIt->second.height0;
+                h1 = chordIt->second.height1;
+                if (it != _spanUnions.end() && (!it->second.haveHeights || it->second.height0 != h0 || it->second.height1 != h1)) {
+                    it->second.height0 = h0;
+                    it->second.height1 = h1;
+                    it->second.haveHeights = true;
+                    rebuildSpanChords();
+                }
+            } else if (!union_->haveHeights) {
+                allResolved = false;
+                continue;
             }
             std::size_t last = std::min(vertexCount, record.vertexOffset + record.vertexCount);
             for (std::size_t i = record.vertexOffset; i < last; i++) {
@@ -4922,8 +5047,10 @@ namespace massif::vt {
             return false;
         }
         geometry->setBaseResolved(true);
-        geometry->setBaseElevationVersion(version);
-        geometry->setBaseSpanVersion(spanVersion);
+        if (!retry) {
+            geometry->setBaseElevationVersion(version);
+            geometry->setBaseSpanVersion(spanVersion);
+        }
         return true;
     }
 

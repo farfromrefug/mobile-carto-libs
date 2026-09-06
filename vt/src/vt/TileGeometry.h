@@ -230,7 +230,24 @@ namespace massif::vt {
 
         /** The span pieces of this tile, empty for anything that is not a SPAN/UNDERGROUND line. */
         const std::vector<SpanRecord>& getSpanRecords() const { return _spanRecords; }
-        void setSpanRecords(std::vector<SpanRecord> spanRecords) { _spanRecords = std::move(spanRecords); }
+        void setSpanRecords(std::vector<SpanRecord> spanRecords) {
+            _spanRecords = std::move(spanRecords);
+            _spanRecordChords.assign(_spanRecords.size(), SpanChordRef());
+        }
+        /**
+         * The chord (portals, world coordinates) each span record last resolved on. A piece drawn
+         * from a tile the cull no longer holds - retained while its replacement loads - has no
+         * union that cull; with the chord it stood on remembered it keeps reading that chord's
+         * heights, so it follows an exaggeration ramp like every other piece instead of freezing.
+         */
+        struct SpanChordRef {
+            cglib::vec2<double> portal0, portal1;
+            bool valid = false;
+        };
+        const SpanChordRef& getSpanRecordChord(std::size_t index) const { return _spanRecordChords[index]; }
+        void setSpanRecordChord(std::size_t index, const cglib::vec2<double>& portal0, const cglib::vec2<double>& portal1) {
+            _spanRecordChords[index] = SpanChordRef { portal0, portal1, true };
+        }
 
         /** The cross-tile span union version the chords were resolved against - a neighbouring
          *  tile arriving completes a bridge and must redo them.
@@ -290,7 +307,8 @@ namespace massif::vt {
         bool _baseResolved = false;          // extrusions: the CPU ground pass has run at least once
         unsigned int _baseElevationVersion = 0; // ...against this elevation data version
         unsigned int _baseSpanVersion = 0;   // ...and this cross-tile span union version
-        std::vector<SpanRecord> _spanRecords; // span lines: one entry per feature piece in this tile
+        std::vector<SpanRecord> _spanRecords; // span lines: one entry per feature piece
+        std::vector<SpanChordRef> _spanRecordChords; // ...and the chord each last resolved on in this tile
 
         VertexArray<std::uint8_t> _vertexGeometry;
         VertexArray<std::uint16_t> _indices;

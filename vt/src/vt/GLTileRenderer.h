@@ -485,6 +485,7 @@ namespace massif::vt {
             double height0 = 0, height1 = 0;
             bool haveHeights = false;
             int zoom = 0; // the tile zoom the pieces came from, for the elevation query
+            bool line = false; // a road/rail piece, whose portals sit ON the road (see the merge)
             bool operator == (const SpanUnion& other) const {
                 return have0 == other.have0 && have1 == other.have1 && portal0 == other.portal0 && portal1 == other.portal1;
             }
@@ -503,6 +504,7 @@ namespace massif::vt {
             cglib::vec2<double> boundsMin, boundsMax;
         };
         mutable std::vector<SpanChord> _spanChords;
+        mutable unsigned int _spanChordsBaseVersion = 0; // the elevation version _spanChords was built at
         void rebuildSpanChords() const;
         static bool chordHeightAt(const std::vector<SpanChord>& chords, const cglib::vec2<double>& pos, double& height);
         std::atomic<unsigned int> _spanUnionVersion { 0 };
@@ -858,12 +860,41 @@ namespace massif::vt {
         // bridge's portals are a property of the WORLD, not of what is on screen: zooming into one
         // end drops the far piece from the visible set, and without this the chord shortens to
         // whatever is still loaded and the deck visibly changes angle.
+        // The heights live HERE, with the chord, not with the pieces standing on it. A union is
+        // rebuilt from scratch every cull and keyed by the piece's tile, so a piece whose tile
+        // just entered the view had no previous heights to keep and hid until the DEM under a
+        // portal answered - which, for a portal off screen, could be never. A chord is one pair
+        // of heights whatever tile asks, and it keeps the last pair it resolved.
         struct CachedChord {
             cglib::vec2<double> portal0, portal1;
             std::uint64_t stamp = 0;
+            double height0 = 0, height1 = 0;
+            bool haveHeights = false;
+            unsigned int sampledCull = 0; // the buildSpanUnions pass that last read it
+            // The elevation version the pair was read at. An exaggeration ramp (the auto-flatten)
+            // moves the ground every frame and buildings re-resolve on each bump; a chord read
+            // once at a cull stayed at its 3D height while the ground sank under it, and a deck
+            // flattened at zero stayed on the water once the ground came back.
+            unsigned int baseVersion = 0;
         };
-        std::vector<CachedChord> _spanChordCache;
+        unsigned int _spanCullSerial = 0;
+        // Keyed by the portals: a city view at a tilt holds well over a thousand distinct chords
+        // (every feature of every structure, per zoom group), and a bound of 512 evicted chords
+        // still in use every cull - each came back without its heights, and its deck hid.
+        using ChordKey = std::array<double, 4>;
+        static ChordKey chordKey(const cglib::vec2<double>& portal0, const cglib::vec2<double>& portal1) {
+            return ChordKey { portal0(0), portal0(1), portal1(0), portal1(1) };
+        }
+        mutable std::map<ChordKey, CachedChord> _spanChordCache;
         std::uint64_t _spanChordClock = 0;
+        CachedChord& rememberChord(const cglib::vec2<double>& portal0, const cglib::vec2<double>& portal1);
+        // The zoom of the finest visible tile holding the point, which is the tile whose DEM level
+        // the road at a portal is drawn with; `fallbackZoom` for a point in no visible tile.
+        int spanSampleZoomAt(const cglib::vec2<double>& pos, int fallbackZoom) const;
+        // Read a chord's portal heights, each at its own tile's zoom, a portal off screen at the
+        // asking piece's. False and the chord unchanged when a portal's DEM is not there: the
+        // last good pair is kept.
+        bool sampleChordHeights(CachedChord& chord, int pieceZoom) const;
         /**
          * The DECK height over a point standing on a span, for anything anchored to the ground
          * that belongs to the bridge rather than to the terrain under it - a road name, a POI, a
@@ -906,10 +937,6 @@ namespace massif::vt {
         // layer has a comp-op (which the bake can not reproduce).
         float calculateDrapeOpacity(const RenderTileLayer& renderLayer) const;
         bool tileCovers(const TileId& tileId, const TileId& targetTileId) const;
-        // The ONE zoom every span portal is sampled at (the finest visible tile's): pieces of a
-        // deck arrive at different tile zooms, and sampled each at its own they read different
-        // DEM levels for the same portal - a step down every tile cut.
-        int _spanSampleZoom = 0;
         bool isTileDraped(const TileId& targetTileId) const;
         cglib::mat4x4<float> calculateDrapeMVPMatrix(const TileId& sourceTileId, const TileId& targetTileId) const;
         std::size_t calculateDrapeFingerprint(const RenderTile& renderTile) const;
