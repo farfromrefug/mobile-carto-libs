@@ -15,6 +15,7 @@ namespace massif::vt {
         A_VERTEXBINORMAL,
         A_VERTEXHEIGHT,
         A_VERTEXBASE,
+        A_VERTEXCHORD,
                 A_VERTEXCOLOR,
         A_VERTEXATTRIBS,
         A_VERTEXOFFSET
@@ -37,6 +38,8 @@ namespace massif::vt {
         U_SPANDRAPETEXTURE,
         U_SPANDRAPETRANSFORM,
         U_SPANDRAPELIGHT,
+        U_GROUNDDRAPETEXTURE,
+        U_GROUNDDRAPE,
         U_SHADOWHEIGHTSCALE,
         U_EMISSIVE,
         U_COLORTABLE,
@@ -186,6 +189,7 @@ namespace massif::vt {
         { "aVertexBinormal", A_VERTEXBINORMAL },
         { "aVertexHeight",   A_VERTEXHEIGHT },
         { "aVertexBase",     A_VERTEXBASE },
+        { "aVertexChord",    A_VERTEXCHORD },
         { "aVertexColor",    A_VERTEXCOLOR },
         { "aVertexAttribs",  A_VERTEXATTRIBS },
         { "aVertexOffset",   A_VERTEXOFFSET }
@@ -208,6 +212,8 @@ namespace massif::vt {
         { "uSpanDrapeTexture", U_SPANDRAPETEXTURE },
         { "uSpanDrapeTransform", U_SPANDRAPETRANSFORM },
         { "uSpanDrapeLight", U_SPANDRAPELIGHT },
+        { "uGroundDrapeTexture", U_GROUNDDRAPETEXTURE },
+        { "uGroundDrape", U_GROUNDDRAPE },
         { "uFloatingBase",     U_FLOATINGBASE },
         { "uShadowHeightScale", U_SHADOWHEIGHTSCALE },
         { "uColorTable",       U_COLORTABLE },
@@ -2267,6 +2273,9 @@ namespace massif::vt {
         // nothing to be lifted off without a terrain anyway.
         attribute float aVertexBase;
         uniform float uBaseScale;
+        // Where the vertex sits along the chord, unclamped: the fill is cut past the portals.
+        attribute float aVertexChord;
+        varying highp_opt float vSpanChord;
         #endif
 
         void main(void) {
@@ -2277,6 +2286,9 @@ namespace massif::vt {
         #endif
         #ifdef DRAPE_MASK
             vTileUnit = pos.xy * uTileUnitScale + uTileUnitOffset;
+        #endif
+        #if defined(SPAN) && defined(TERRAIN)
+            vSpanChord = aVertexChord;
         #endif
             vec4 color = uColorTable[styleIndex];
         #ifdef PATTERN
@@ -2316,8 +2328,18 @@ namespace massif::vt {
         #ifdef DRAPE_MASK
         varying mediump vec2 vTileUnit;
         #endif
+        #if defined(SPAN) && defined(TERRAIN)
+        varying highp_opt float vSpanChord;
+        #endif
 
         void main(void) {
+        #if defined(SPAN) && defined(TERRAIN)
+            // A bed ends where its road's chord does: past a portal it lay over the quay and hid
+            // the ground drawn there.
+            if (vSpanChord < 0.0 || vSpanChord > 1.0) {
+                discard;
+            }
+        #endif
         #ifdef PATTERN
             // A plain fill sharing the draw has vUV.z 0 and keeps its flat colour.
             lowp vec4 color = mix(vColor, texture2D(uPattern, vUV.xy) * vColor, vUV.z);
@@ -2472,6 +2494,11 @@ namespace massif::vt {
         // 1 on the deck's roof, 0 on its walls: only the roof wears the road (see polygon3DFsh).
         varying lowp float vSpanRoof;
         #endif
+        #if defined(SPAN) && defined(TERRAIN)
+        // Where the vertex sits along the chord, unclamped: the deck is cut past the portals.
+        attribute float aVertexChord;
+        varying highp_opt float vSpanChord;
+        #endif
 
         void main(void) {
             int styleIndex = int(aVertexAttribs[0]);
@@ -2542,6 +2569,9 @@ namespace massif::vt {
         #ifdef SPAN_DRAPE
             vSpanRoof = 1.0 - sideVertex;
         #endif
+        #if defined(SPAN) && defined(TERRAIN)
+            vSpanChord = aVertexChord;
+        #endif
             gl_Position = applyDepthBias(uMVPMatrix * vec4(pos, 1.0));
         }
     )GLSL";
@@ -2560,6 +2590,15 @@ namespace massif::vt {
         // neutrally and the drape already carries its light.
         uniform mediump vec3 uSpanDrapeLight;
         varying lowp float vSpanRoof;
+        // The tile's own ground drape, worn by the roof PAST the road's portals: a deck ring runs
+        // on past its road's bridge segment (Petit-Pont, 10 m onto the south quay), and there the
+        // roof is ground - the approach, the crosswalk - not deck. uGroundDrape is 0 when the
+        // tile has no drape this frame.
+        uniform sampler2D uGroundDrapeTexture;
+        uniform mediump float uGroundDrape;
+        #endif
+        #if defined(SPAN) && defined(TERRAIN)
+        varying highp_opt float vSpanChord;
         #endif
         #ifdef TERRAIN_SHADOW
         varying mediump vec3 vShadowNormal;
@@ -2626,6 +2665,11 @@ namespace massif::vt {
             lowp vec4 draped = texture2D(uSpanDrapeTexture, drapeUV);
             // Past the baked bounds there is no road: nothing, not the clamped edge texel.
             draped *= step(0.0, drapeUV.x) * step(drapeUV.x, 1.0) * step(0.0, drapeUV.y) * step(drapeUV.y, 1.0);
+        #if defined(SPAN) && defined(TERRAIN)
+            if (uGroundDrape > 0.5 && (vSpanChord < 0.0 || vSpanChord > 1.0)) {
+                draped = texture2D(uGroundDrapeTexture, spanUV); // the same parametrization as the bake's
+            }
+        #endif
         #endif
         #ifdef LIGHTING_FSH
             // The deck's OWN colour: its walls, and the roof wherever the drape covers nothing.

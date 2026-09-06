@@ -5040,27 +5040,40 @@ namespace massif::vt {
                 allResolved = false;
                 continue;
             }
-            std::size_t last = std::min(vertexCount, record.vertexOffset + record.vertexCount);
-            for (std::size_t i = record.vertexOffset; i < last; i++) {
+            // The base from the vertex's own place along the chord, and that place itself,
+            // unclamped, for the shader to tell the deck past the portals (TileGeometry::chordOffset).
+            // A fill's or a deck's END BAND follows the ground UP where it is higher than the
+            // chord - the quay side of an abutment - and stays level where it is lower, the wall
+            // under it covering that side (SpanGeometry::endBandWeight).
+            double band = params.chordOffset >= 0
+                ? SpanGeometry::endBandFraction(cglib::length(w1 - w0) * 40075017.0 / std::cosh(6.283185307179586 * (w0(1) + w1(1)) * 0.5))
+                : 0.0;
+            auto resolveVertex = [&](std::size_t i) {
                 const std::uint8_t* vertex = vertexGeometry.data() + i * params.vertexSize;
                 const std::int16_t* pos = reinterpret_cast<const std::int16_t*>(vertex + params.coordOffset);
                 cglib::vec2<double> p(pos[0] / static_cast<double>(params.coordScale), pos[1] / static_cast<double>(params.coordScale));
                 cglib::vec2<double> w = cglib::transform_point(cglib::vec2<double>(p(0), 1.0 - p(1)), tileMatrix);
-                geometry->setVertexBase(i, static_cast<float>(SpanGeometry::chordHeight(h0, h1, SpanGeometry::chordParam(w, w0, w1)) + baseOffsetAt(w, record.baseOffset)));
+                double t = SpanGeometry::chordParamRaw(w, w0, w1);
+                double base = SpanGeometry::chordHeight(h0, h1, std::max(0.0, std::min(1.0, t)));
+                double weight = SpanGeometry::endBandWeight(t, band);
+                double ground = 0;
+                if (weight > 0 && _extrusionElevationProvider(cglib::vec3<double>(w(0), w(1), 0), spanSampleZoomAt(w, sourceTileId.zoom), false, ground) && ground > base) {
+                    base += weight * (ground - base);
+                }
+                geometry->setVertexBase(i, static_cast<float>(base + baseOffsetAt(w, record.baseOffset)));
+                geometry->setVertexChord(i, static_cast<float>(t));
                 patched[i] = true;
+            };
+            std::size_t last = std::min(vertexCount, record.vertexOffset + record.vertexCount);
+            for (std::size_t i = record.vertexOffset; i < last; i++) {
+                resolveVertex(i);
             }
             // ...and the same chord for whatever the records did not reach. One geometry holds one
             // structure here, so the first resolved chord is the right one for all of it.
             for (std::size_t i = 0; i < vertexCount; i++) {
-                if (patched[i]) {
-                    continue;
+                if (!patched[i]) {
+                    resolveVertex(i);
                 }
-                const std::uint8_t* vertex = vertexGeometry.data() + i * params.vertexSize;
-                const std::int16_t* pos = reinterpret_cast<const std::int16_t*>(vertex + params.coordOffset);
-                cglib::vec2<double> p(pos[0] / static_cast<double>(params.coordScale), pos[1] / static_cast<double>(params.coordScale));
-                cglib::vec2<double> w = cglib::transform_point(cglib::vec2<double>(p(0), 1.0 - p(1)), tileMatrix);
-                geometry->setVertexBase(i, static_cast<float>(SpanGeometry::chordHeight(h0, h1, SpanGeometry::chordParam(w, w0, w1)) + baseOffsetAt(w, record.baseOffset)));
-                patched[i] = true;
             }
         }
         if (!allResolved) {
@@ -7035,6 +7048,10 @@ namespace massif::vt {
                 shaderProgramPtr = &buildShaderProgram("polygon3d", polygon3DVsh, polygon3DFsh, LightingMode::GEOMETRY3D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | (terrainVTF ? TERRAIN_VTF_FLAG | TERRAIN_FLAG : 0) | (shadowReceiver ? shadowReceiverFlags() | SHADOW_SINGLE_TAP_FLAG | SHADOW_RECEIVER_3D_FLAG : 0) | (!geometry->getSpanRecords().empty() ? SPAN_FLAG : 0) | (spanDrape ? SPAN_DRAPE_FLAG : 0) | fogFlag());
                 _pendingSpanDrape = spanDrape ? spanDrapeTexture : 0;
                 _pendingSpanDrapeTransform = spanDrapeTransform;
+                // The roof's target tile is drawn with its own drape this frame, uv 0..1 (see
+                // renderTileSurfaceDrape) - the roof past the road's portals wears that.
+                auto groundIt = _drapeTextures.find(targetTileId);
+                _pendingGroundDrape = (spanDrape && groundIt != _drapeTextures.end() && _drapeTilesThisFrame.count(targetTileId)) ? groundIt->second : 0;
             }
             break;
         default:
@@ -7219,6 +7236,12 @@ namespace massif::vt {
                 glUniform4fv(shaderProgram.uniforms[U_SPANDRAPETRANSFORM], 1, _pendingSpanDrapeTransform.data());
                 cglib::vec3<float> drapeLight = spanDrapeLight();
                 glUniform3fv(shaderProgram.uniforms[U_SPANDRAPELIGHT], 1, drapeLight.data());
+                if (_pendingGroundDrape != 0) {
+                    glActiveTexture(GL_TEXTURE5);
+                    glBindTexture(GL_TEXTURE_2D, _pendingGroundDrape);
+                    glUniform1i(shaderProgram.uniforms[U_GROUNDDRAPETEXTURE], 5);
+                }
+                glUniform1f(shaderProgram.uniforms[U_GROUNDDRAPE], _pendingGroundDrape != 0 ? 1.0f : 0.0f);
                 glActiveTexture(GL_TEXTURE0);
             }
             cglib::mat3x3<float> tileMatrix = cglib::mat3x3<float>::convert(cglib::inverse(calculateTileMatrix2D(targetTileId)) * calculateTileMatrix2D(sourceTileId));
@@ -7432,6 +7455,10 @@ namespace massif::vt {
                 enableVertexAttrib(shaderProgram.attribs[A_VERTEXBASE], 1, GL_FLOAT, GL_FALSE, vertexGeomLayoutParams.vertexSize, bufferGLOffset(vertexGeomLayoutParams.baseOffset));
             }
 
+            if (vertexGeomLayoutParams.chordOffset >= 0) {
+                enableVertexAttrib(shaderProgram.attribs[A_VERTEXCHORD], 1, GL_FLOAT, GL_FALSE, vertexGeomLayoutParams.vertexSize, bufferGLOffset(vertexGeomLayoutParams.chordOffset));
+            }
+
         }
 
         if (!(vertexGeomLayoutParams.attribsOffset >= 0)) {
@@ -7450,6 +7477,10 @@ namespace massif::vt {
         if (compiledGeometry.geometryVAO != 0) {
             glBindVertexArray(0);
         } else {
+
+            if (vertexGeomLayoutParams.chordOffset >= 0) {
+                disableVertexAttrib(shaderProgram.attribs[A_VERTEXCHORD]);
+            }
 
             if (vertexGeomLayoutParams.baseOffset >= 0) {
                 disableVertexAttrib(shaderProgram.attribs[A_VERTEXBASE]);

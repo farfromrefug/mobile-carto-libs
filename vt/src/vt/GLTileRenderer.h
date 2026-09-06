@@ -752,6 +752,7 @@ namespace massif::vt {
         std::vector<std::pair<int, cglib::vec2<double>>> _unresolvedSpanEnds; // see collectUnresolvedSpanEnds
         bool _labelAnchorOnCull = true;
         GLuint _pendingSpanDrape = 0;
+        GLuint _pendingGroundDrape = 0; // the target tile's ground drape, for the roof past the portals
         cglib::vec4<float> _pendingSpanDrapeTransform = cglib::vec4<float>(0, 0, 1, 1);
         // The body shared by bakeDrapeTile and bakeDrapeCoverage: the same covering tiles, the same
         // transforms, restricted to the style layers at or after fromStyleLayerIdx. Caller holds the

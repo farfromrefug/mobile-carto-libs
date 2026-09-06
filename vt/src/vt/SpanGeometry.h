@@ -61,14 +61,79 @@ namespace massif::vt {
                 && p(1) > margin && p(1) < 1.0f - margin;
         }
 
-        /** Where a point falls along the chord, clamped to it: 0 at one portal, 1 at the other. */
-        static double chordParam(const cglib::vec2<double>& pos, const cglib::vec2<double>& portal0, const cglib::vec2<double>& portal1) {
+        /**
+         * Where a point falls along the chord, UNCLAMPED: 0 at one portal, 1 at the other, and
+         * outside that past either. A deck ring's skewed end reaches past its road's portal on
+         * one side, and the roof there covered the crosswalk on the quay (Petit-Pont, north end,
+         * 2026-09-06); the shader cuts the deck at the portals by this.
+         */
+        static double chordParamRaw(const cglib::vec2<double>& pos, const cglib::vec2<double>& portal0, const cglib::vec2<double>& portal1) {
             cglib::vec2<double> chord = portal1 - portal0;
             double length2 = cglib::dot_product(chord, chord);
             if (length2 <= 0) {
                 return 0;
             }
-            return std::max(0.0, std::min(1.0, cglib::dot_product(pos - portal0, chord) / length2));
+            return cglib::dot_product(pos - portal0, chord) / length2;
+        }
+
+        /**
+         * How far from each end a fill or a deck follows the ground UP, in metres, and at most
+         * as a fraction of the span. The ground either side of an abutment is not at one height
+         * (the quay slopes to the water), and a deck level across its width at the portal's
+         * height showed a wedge of ground through one corner and a gap under the other
+         * (Petit-Pont, 2026-09-06). A real abutment retains the ground: the deck's end band
+         * rises to whatever is higher, never sinks, and is level again a few metres in.
+         */
+        static constexpr double END_BAND_METRES = 12.0;
+        static constexpr double END_BAND_MAX_FRACTION = 0.25;
+        /** The longest edge a span ring keeps, so the end band has vertices to bend at. */
+        static constexpr double SUBDIVISION_METRES = 4.0;
+        static constexpr double SUBDIVISION_MAX_EDGES = 40.0;
+
+        /** The end band's share of the chord, from its length in metres. */
+        static double endBandFraction(double chordMetres) {
+            return chordMetres > 0 ? std::min(END_BAND_MAX_FRACTION, END_BAND_METRES / chordMetres) : 0.0;
+        }
+
+        /** 1 at and past a portal, fading to 0 across the end band, 0 along the rest of the deck. */
+        static double endBandWeight(double t, double band) {
+            if (band <= 0) {
+                return 0;
+            }
+            if (t <= 0 || t >= 1) {
+                return 1;
+            }
+            if (t < band) {
+                return 1 - t / band;
+            }
+            if (t > 1 - band) {
+                return (t - (1 - band)) / band;
+            }
+            return 0;
+        }
+
+        /** The ring with every edge longer than `maxEdge` split evenly, so none exceeds it. */
+        static std::vector<cglib::vec2<float>> subdivideRing(const std::vector<cglib::vec2<float>>& ring, float maxEdge) {
+            std::vector<cglib::vec2<float>> result;
+            if (ring.size() < 2 || !(maxEdge > 0)) {
+                return ring;
+            }
+            result.reserve(ring.size() * 2);
+            for (std::size_t i = 0; i < ring.size(); i++) {
+                const cglib::vec2<float>& a = ring[i];
+                const cglib::vec2<float>& b = ring[(i + 1) % ring.size()];
+                result.push_back(a);
+                int pieces = static_cast<int>(std::ceil(cglib::length(b - a) / maxEdge));
+                for (int k = 1; k < pieces; k++) {
+                    result.push_back(a + (b - a) * (static_cast<float>(k) / pieces));
+                }
+            }
+            return result;
+        }
+
+        /** The same, clamped to the chord - the height past a portal is the portal's. */
+        static double chordParam(const cglib::vec2<double>& pos, const cglib::vec2<double>& portal0, const cglib::vec2<double>& portal1) {
+            return std::max(0.0, std::min(1.0, chordParamRaw(pos, portal0, portal1)));
         }
 
         /** The deck height at that point - the whole purpose: straight, whatever the DEM does. */
