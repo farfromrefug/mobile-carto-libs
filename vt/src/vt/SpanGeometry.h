@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -93,6 +94,55 @@ namespace massif::vt {
         /** The end band's share of the chord, from its length in metres. */
         static double endBandFraction(double chordMetres) {
             return chordMetres > 0 ? std::min(END_BAND_MAX_FRACTION, END_BAND_METRES / chordMetres) : 0.0;
+        }
+
+        /** The direction of the ring's longest edge - on a deck a side, which runs with the road. */
+        static cglib::vec2<float> longestEdgeAxis(const std::vector<cglib::vec2<float>>& ring) {
+            cglib::vec2<float> best(0, 0);
+            float bestLength2 = 0;
+            for (std::size_t i = 0; i < ring.size(); i++) {
+                cglib::vec2<float> edge = ring[(i + 1) % ring.size()] - ring[i];
+                float length2 = cglib::dot_product(edge, edge);
+                if (length2 > bestLength2) {
+                    bestLength2 = length2;
+                    best = edge;
+                }
+            }
+            return bestLength2 > 0 ? best * (1.0f / std::sqrt(bestLength2)) : best;
+        }
+
+        /**
+         * The ring with each end squared OUTWARD: every vertex within `zone` of the ring's
+         * extreme chainage along its longest edge is moved along that edge to the extreme. A deck
+         * ring's skewed end leaves one corner past the road's portal and the other short of it
+         * (Petit-Pont, 9 m and 5 m), and short of the portal the road ran bare on the ground
+         * before the approach began. Squared to the far corner the deck reaches the portal on
+         * both sides; past it the roof wears the ground. Done on the ring, before tessellation:
+         * moving packed vertices after the fact left wall fins wherever a chord changed. The
+         * axis is the longest edge rather than the end centres, whose two-pass fraction can drop
+         * a skewed corner and tilt the axis into the deck.
+         */
+        static std::vector<cglib::vec2<float>> squareEnds(const std::vector<cglib::vec2<float>>& ring, float zone) {
+            if (ring.size() < 3) {
+                return ring;
+            }
+            cglib::vec2<float> axis = longestEdgeAxis(ring);
+            std::vector<float> chainage(ring.size());
+            float cmin = std::numeric_limits<float>::max(), cmax = std::numeric_limits<float>::lowest();
+            for (std::size_t i = 0; i < ring.size(); i++) {
+                chainage[i] = cglib::dot_product(ring[i], axis);
+                cmin = std::min(cmin, chainage[i]);
+                cmax = std::max(cmax, chainage[i]);
+            }
+            std::vector<cglib::vec2<float>> result(ring);
+            for (std::size_t i = 0; i < ring.size(); i++) {
+                if (chainage[i] < cmin + zone) {
+                    result[i] = ring[i] + axis * (cmin - chainage[i]);
+                } else if (chainage[i] > cmax - zone) {
+                    result[i] = ring[i] + axis * (cmax - chainage[i]);
+                }
+            }
+            return result;
         }
 
         /** 1 at and past a portal, fading to 0 across the end band, 0 along the rest of the deck. */

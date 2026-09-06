@@ -543,10 +543,11 @@ namespace massif::vt {
         // Metres per tile unit at this tile's latitude: the mercator stretch is 1/cos(lat).
         double y = 0.5 - (_tileId.y + 0.5) / (1 << _tileId.zoom);
         double tileMetres = 40075017.0 / (1 << _tileId.zoom) / std::cosh(6.283185307179586 * y);
-        auto ends = SpanGeometry::endCentres(ring);
+        Vertices squared = SpanGeometry::squareEnds(ring, static_cast<float>(SpanGeometry::END_BAND_METRES / tileMetres));
+        auto ends = SpanGeometry::endCentres(squared);
         double spanMetres = cglib::length(ends.second - ends.first) * tileMetres;
         double edgeMetres = std::max(SpanGeometry::SUBDIVISION_METRES, spanMetres / SpanGeometry::SUBDIVISION_MAX_EDGES);
-        return SpanGeometry::subdivideRing(ring, static_cast<float>(edgeMetres / tileMetres));
+        return SpanGeometry::subdivideRing(squared, static_cast<float>(edgeMetres / tileMetres));
     }
 
     TileLayerBuilder::SpanVertexInfo TileLayerBuilder::spanInfoForRing(const Vertices& ring, long long id, float baseOffset) {

@@ -152,8 +152,9 @@ namespace massif::vt {
 
         // The span a filled ring stands on: its two vertices FARTHEST APART, which for a
         // deck-shaped ring are its ends. Shared by the flat bed and the extruded deck.
-        // A span ring with its edges split to SpanGeometry::SUBDIVISION_METRES (at most
-        // SUBDIVISION_MAX_EDGES along the span), so the end band has vertices to bend at.
+        // A span ring with its ends squared outward (SpanGeometry::squareEnds) and its edges split
+        // to SUBDIVISION_METRES (at most SUBDIVISION_MAX_EDGES along the span), so the end band
+        // has vertices to bend at.
         Vertices subdivideSpanRing(const Vertices& ring) const;
         static SpanVertexInfo spanInfoForRing(const Vertices& ring, long long id, float baseOffset = 0.0f);
 

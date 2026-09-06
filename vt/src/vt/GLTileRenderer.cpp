@@ -5485,6 +5485,35 @@ namespace massif::vt {
         }
     }
 
+    void GLTileRenderer::setGroundDrapeTextures(const std::map<TileId, GroundDrape>& drapes) {
+        std::lock_guard<std::mutex> lock(_mutex);
+
+        _groundDrapes = drapes;
+    }
+
+    bool GLTileRenderer::resolveGroundDrape(const TileId& targetTileId, GLuint& texture, cglib::vec4<float>& uvTransform) const {
+        if (_groundDrapes.empty()) {
+            return false;
+        }
+        // The drape tile holding the target, or an ancestor: the owner's sub-rect composed with
+        // the target's share of the drape tile. A drape stack finer than the render tile would
+        // take several textures for one draw, so it gets none.
+        for (TileId tileId = targetTileId; true; tileId = tileId.getParent()) {
+            auto it = _groundDrapes.find(tileId);
+            if (it != _groundDrapes.end() && it->second.texture != 0) {
+                float scale = 1.0f / (1 << (targetTileId.zoom - tileId.zoom));
+                float u = (targetTileId.x - (tileId.x << (targetTileId.zoom - tileId.zoom))) * scale;
+                float v = (targetTileId.y - (tileId.y << (targetTileId.zoom - tileId.zoom))) * scale;
+                texture = it->second.texture;
+                uvTransform = cglib::vec4<float>(it->second.uvOffsetX + u * it->second.uvScale, it->second.uvOffsetY + v * it->second.uvScale, scale * it->second.uvScale, scale * it->second.uvScale);
+                return true;
+            }
+            if (tileId.zoom <= 0) {
+                return false;
+            }
+        }
+    }
+
     cglib::vec3<float> GLTileRenderer::spanDrapeLight() const {
         return SpanDrapeLight::resolve(_terrainLighting.enabled, _terrainLighting.sunDir, _terrainLighting.sunColor, _terrainLighting.sunIntensity, _terrainLighting.ambientColor, _terrainLighting.ambientIntensity);
     }
@@ -7048,10 +7077,7 @@ namespace massif::vt {
                 shaderProgramPtr = &buildShaderProgram("polygon3d", polygon3DVsh, polygon3DFsh, LightingMode::GEOMETRY3D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | (terrainVTF ? TERRAIN_VTF_FLAG | TERRAIN_FLAG : 0) | (shadowReceiver ? shadowReceiverFlags() | SHADOW_SINGLE_TAP_FLAG | SHADOW_RECEIVER_3D_FLAG : 0) | (!geometry->getSpanRecords().empty() ? SPAN_FLAG : 0) | (spanDrape ? SPAN_DRAPE_FLAG : 0) | fogFlag());
                 _pendingSpanDrape = spanDrape ? spanDrapeTexture : 0;
                 _pendingSpanDrapeTransform = spanDrapeTransform;
-                // The roof's target tile is drawn with its own drape this frame, uv 0..1 (see
-                // renderTileSurfaceDrape) - the roof past the road's portals wears that.
-                auto groundIt = _drapeTextures.find(targetTileId);
-                _pendingGroundDrape = (spanDrape && groundIt != _drapeTextures.end() && _drapeTilesThisFrame.count(targetTileId)) ? groundIt->second : 0;
+                _pendingGroundDrape = spanDrape && resolveGroundDrape(targetTileId, _pendingGroundDrape, _pendingGroundDrapeTransform) ? _pendingGroundDrape : 0;
             }
             break;
         default:
@@ -7237,9 +7263,12 @@ namespace massif::vt {
                 cglib::vec3<float> drapeLight = spanDrapeLight();
                 glUniform3fv(shaderProgram.uniforms[U_SPANDRAPELIGHT], 1, drapeLight.data());
                 if (_pendingGroundDrape != 0) {
-                    glActiveTexture(GL_TEXTURE5);
+                    // Unit 6: 5 is the elevation node texture (setupTerrainUniforms) - bound there,
+                    // the drape displaced the deck's vertices and its shadow swept the terrain.
+                    glActiveTexture(GL_TEXTURE6);
                     glBindTexture(GL_TEXTURE_2D, _pendingGroundDrape);
-                    glUniform1i(shaderProgram.uniforms[U_GROUNDDRAPETEXTURE], 5);
+                    glUniform1i(shaderProgram.uniforms[U_GROUNDDRAPETEXTURE], 6);
+                    glUniform4fv(shaderProgram.uniforms[U_GROUNDDRAPETRANSFORM], 1, _pendingGroundDrapeTransform.data());
                 }
                 glUniform1f(shaderProgram.uniforms[U_GROUNDDRAPE], _pendingGroundDrape != 0 ? 1.0f : 0.0f);
                 glActiveTexture(GL_TEXTURE0);

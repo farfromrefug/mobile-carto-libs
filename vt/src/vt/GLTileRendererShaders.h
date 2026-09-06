@@ -39,6 +39,7 @@ namespace massif::vt {
         U_SPANDRAPETRANSFORM,
         U_SPANDRAPELIGHT,
         U_GROUNDDRAPETEXTURE,
+        U_GROUNDDRAPETRANSFORM,
         U_GROUNDDRAPE,
         U_SHADOWHEIGHTSCALE,
         U_EMISSIVE,
@@ -213,6 +214,7 @@ namespace massif::vt {
         { "uSpanDrapeTransform", U_SPANDRAPETRANSFORM },
         { "uSpanDrapeLight", U_SPANDRAPELIGHT },
         { "uGroundDrapeTexture", U_GROUNDDRAPETEXTURE },
+        { "uGroundDrapeTransform", U_GROUNDDRAPETRANSFORM },
         { "uGroundDrape", U_GROUNDDRAPE },
         { "uFloatingBase",     U_FLOATINGBASE },
         { "uShadowHeightScale", U_SHADOWHEIGHTSCALE },
@@ -2595,6 +2597,7 @@ namespace massif::vt {
         // roof is ground - the approach, the crosswalk - not deck. uGroundDrape is 0 when the
         // tile has no drape this frame.
         uniform sampler2D uGroundDrapeTexture;
+        uniform mediump vec4 uGroundDrapeTransform; // the target tile's share of the owner's drape texture
         uniform mediump float uGroundDrape;
         #endif
         #if defined(SPAN) && defined(TERRAIN)
@@ -2667,7 +2670,7 @@ namespace massif::vt {
             draped *= step(0.0, drapeUV.x) * step(drapeUV.x, 1.0) * step(0.0, drapeUV.y) * step(drapeUV.y, 1.0);
         #if defined(SPAN) && defined(TERRAIN)
             if (uGroundDrape > 0.5 && (vSpanChord < 0.0 || vSpanChord > 1.0)) {
-                draped = texture2D(uGroundDrapeTexture, spanUV); // the same parametrization as the bake's
+                draped = texture2D(uGroundDrapeTexture, spanUV * uGroundDrapeTransform.zw + uGroundDrapeTransform.xy);
             }
         #endif
         #endif

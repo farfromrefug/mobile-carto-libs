@@ -376,6 +376,15 @@ namespace massif::vt {
         // The baked span drape per tile, handed back by the owner after baking. Empty = no bridge
         // in view, which is the only cost a map without spans pays.
         void setSpanDrapeTextures(const std::map<TileId, GLuint>& textures);
+        // The GROUND drape drawn on each drape tile this frame - the owner's composite, with the
+        // sub-rect it draws it through - for the roof of a deck past its road's portals, which is
+        // ground. Handed over like the span drapes: the renderer's own _drapeTextures are not in
+        // play when the owner composites the stack.
+        struct GroundDrape {
+            GLuint texture = 0;
+            float uvOffsetX = 0.0f, uvOffsetY = 0.0f, uvScale = 1.0f;
+        };
+        void setGroundDrapeTextures(const std::map<TileId, GroundDrape>& drapes);
         // This renderer's style layers with drapeable content in the visible set, in draw order,
         // each flagged draped (goes in the bake) or live (matched setNoDrapeLayerFilter). The owner
         // concatenates these across layers into one ordered stack, which is where a live layer's
@@ -752,7 +761,10 @@ namespace massif::vt {
         std::vector<std::pair<int, cglib::vec2<double>>> _unresolvedSpanEnds; // see collectUnresolvedSpanEnds
         bool _labelAnchorOnCull = true;
         GLuint _pendingSpanDrape = 0;
+        std::map<TileId, GroundDrape> _groundDrapes;
+        bool resolveGroundDrape(const TileId& targetTileId, GLuint& texture, cglib::vec4<float>& uvTransform) const;
         GLuint _pendingGroundDrape = 0; // the target tile's ground drape, for the roof past the portals
+        cglib::vec4<float> _pendingGroundDrapeTransform = cglib::vec4<float>(0, 0, 1, 1);
         cglib::vec4<float> _pendingSpanDrapeTransform = cglib::vec4<float>(0, 0, 1, 1);
         // The body shared by bakeDrapeTile and bakeDrapeCoverage: the same covering tiles, the same
         // transforms, restricted to the style layers at or after fromStyleLayerIdx. Caller holds the
