@@ -4395,6 +4395,10 @@ namespace massif::vt {
         // gives a different chord per geometry.
         std::map<int, std::vector<SpanPiece>> piecesByZoom;
         std::set<const Tile*> visited;
+        _spanSampleZoom = 0;
+        for (const TileId& tileId : _visibleTileIds) {
+            _spanSampleZoom = std::max(_spanSampleZoom, tileId.zoom);
+        }
         // The reference tiles first: at the source's max zoom they hold a piece UNCUT by the
         // overzoomed targets on screen, and the visited set then skips a visible tile that is
         // the same object.
@@ -4648,8 +4652,12 @@ namespace massif::vt {
                     continue;
                 }
                 double h0 = 0, h1 = 0;
-                if (_extrusionElevationProvider(cglib::vec3<double>(span.portal0(0), span.portal0(1), 0), span.zoom, false, h0)
-                 && _extrusionElevationProvider(cglib::vec3<double>(span.portal1(0), span.portal1(1), 0), span.zoom, false, h1)) {
+                // The drawn surface (not the smoothed field a building's base uses): the approach
+                // road is draped on it, and the deck has to meet that road. At _spanSampleZoom for
+                // EVERY piece: sampled at the piece's own zoom, one chord read two ground heights
+                // (Pont Neuf z21.2: 1.345 on 22 pieces, 1.306 on 22 more) and stepped at the cut.
+                if (_extrusionElevationProvider(cglib::vec3<double>(span.portal0(0), span.portal0(1), 0), _spanSampleZoom, false, h0)
+                 && _extrusionElevationProvider(cglib::vec3<double>(span.portal1(0), span.portal1(1), 0), _spanSampleZoom, false, h1)) {
                     span.height0 = h0;
                     span.height1 = h1;
                     span.haveHeights = true;
@@ -4658,7 +4666,27 @@ namespace massif::vt {
             }
         }
 
-        if (spanUnions != _spanUnions) {
+        // Fresh heights replace the old ones - a finer DEM landing, or the sample zoom moving with
+        // the view, moves the deck with the surface it must meet. A pair that did NOT resolve this
+        // time keeps what it had: its far portal's tile may just have left the cache, and dropping
+        // the height would hide the deck for a frame.
+        bool changed = (spanUnions != _spanUnions);
+        for (auto it = spanUnions.begin(); it != spanUnions.end(); it++) {
+            auto oldIt = _spanUnions.find(it->first);
+            if (oldIt == _spanUnions.end() || !oldIt->second.haveHeights) {
+                continue;
+            }
+            SpanUnion& span = it->second;
+            const SpanUnion& old = oldIt->second;
+            if (!span.haveHeights) {
+                span.height0 = old.height0;
+                span.height1 = old.height1;
+                span.haveHeights = true;
+            } else if (span.height0 != old.height0 || span.height1 != old.height1) {
+                changed = true;
+            }
+        }
+        if (changed) {
             _spanUnions = std::move(spanUnions);
             rebuildSpanChords();
             _spanUnionVersion.fetch_add(1, std::memory_order_relaxed);
@@ -4846,8 +4874,8 @@ namespace massif::vt {
             // built - labels need it a pass earlier than this - so this is the late arrival.
             double h0 = it->second.height0, h1 = it->second.height1;
             if (!it->second.haveHeights) {
-                if (!_extrusionElevationProvider(cglib::vec3<double>(w0(0), w0(1), 0), sourceTileId.zoom, false, h0)
-                 || !_extrusionElevationProvider(cglib::vec3<double>(w1(0), w1(1), 0), sourceTileId.zoom, false, h1)) {
+                if (!_extrusionElevationProvider(cglib::vec3<double>(w0(0), w0(1), 0), _spanSampleZoom, false, h0)
+                 || !_extrusionElevationProvider(cglib::vec3<double>(w1(0), w1(1), 0), _spanSampleZoom, false, h1)) {
                     allResolved = false;
                     continue;
                 }
