@@ -996,7 +996,18 @@ namespace massif::vt {
     void GLTileRenderer::setLabelElevationProvider(std::function<double(const cglib::vec3<double>&)> provider) {
         std::lock_guard<std::mutex> lock(_mutex);
 
+        bool had = static_cast<bool>(_labelElevationProvider);
         _labelElevationProvider = std::move(provider);
+        // The terrain going flat withdraws the provider, and the ramp's last anchoring ran a step
+        // before the ground reached 0: every label stayed there - 90 of 228 up, the highest 17 m
+        // over a flat ground (Petit-Pont z19, 2026-09-06) - and nothing would anchor them again.
+        if (had && !_labelElevationProvider) {
+            std::function<double(const cglib::vec3<double>&)> flat = [](const cglib::vec3<double>&) { return 0.0; };
+            for (const std::shared_ptr<Label>& label : _labels) {
+                label->updateElevation(flat);
+                label->setElevationDirty(false);
+            }
+        }
     }
 
     void GLTileRenderer::invalidateLabelElevation() {
@@ -4795,7 +4806,7 @@ namespace massif::vt {
         if (_spanChords.empty()) {
             return _labelElevationProvider;
         }
-        // Rebuilt when the ground moved since: the entries were re-read by the pieces on them.
+        // Rebuilt when the ground moved since, re-reading the entries as it goes.
         if (_spanChordsBaseVersion != _extrusionBaseVersion.load(std::memory_order_relaxed)) {
             rebuildSpanChords();
         }
@@ -4864,9 +4875,18 @@ namespace massif::vt {
             // The entry's pair when it has one: the union's copy is what the cull saw, the entry
             // is re-read every ramp frame by the pieces on it.
             auto entryIt = _spanChordCache.find(chordKey(span.portal0, span.portal1));
-            if (entryIt != _spanChordCache.end() && entryIt->second.haveHeights) {
-                chord.height0 = entryIt->second.height0;
-                chord.height1 = entryIt->second.height1;
+            if (entryIt != _spanChordCache.end()) {
+                // Re-read HERE, not by the pieces on the draw: labels anchor before any deck
+                // resolves in the frame, so a rebuild from the entries as the last frame left
+                // them kept every POI one ramp step behind the deck - and there for good after
+                // the ramp's last frame, which nothing rebuilt after.
+                if (entryIt->second.baseVersion != _spanChordsBaseVersion) {
+                    sampleChordHeights(entryIt->second, span.zoom);
+                }
+                if (entryIt->second.haveHeights) {
+                    chord.height0 = entryIt->second.height0;
+                    chord.height1 = entryIt->second.height1;
+                }
             }
             // The bounds isOnChord could ever accept: the portals, out by the match allowance.
             double allowance = SpanGeometry::matchAllowance(cglib::length(span.portal1 - span.portal0));
