@@ -4576,16 +4576,12 @@ namespace massif::vt {
                     // with a portal: a piece in the middle of a long bridge is cut at both ends and
                     // has no portal to offer, and those are exactly the pieces left stranded when
                     // the far end of the deck is off screen and its tiles are gone.
-                    cglib::vec2<double> middle = (pieces[i].e0 + pieces[i].e1) * 0.5;
-                    for (const CachedChord& chord : _spanChordCache) {
-                        if (!SpanGeometry::isOnChord(middle, chord.portal0, chord.portal1)) {
-                            continue;
-                        }
-                        span.portal0 = chord.portal0;
-                        span.portal1 = chord.portal1;
+                    auto chordIt = SpanGeometry::borrowChord(pieces[i].e0, pieces[i].portal0, pieces[i].e1, pieces[i].portal1, _spanChordCache.begin(), _spanChordCache.end());
+                    if (chordIt != _spanChordCache.end()) {
+                        span.portal0 = chordIt->portal0;
+                        span.portal1 = chordIt->portal1;
                         span.have0 = span.have1 = true;
                         span.haveHeights = false; // resolved below, against this zoom's elevation
-                        break;
                     }
                 }
                 span.zoom = pieces[i].key.tileId.zoom;
@@ -4608,18 +4604,33 @@ namespace massif::vt {
         // A dual carriageway is TWO features running side by side, and sampling each one's own
         // abutment put the two decks 20 m apart vertically - one visibly stepping over the other.
         // Spans that start and end together are one structure, so they share one chord.
+        // And the SAME deck seen from two source tiles: each tile clips the ring where it likes, so
+        // the two copies end 30 m apart and resolve two chords - at Pont Neuf 1.3358/1.3148 against
+        // 1.4256/1.1267, the second's ends on the quay slopes - and the deck stepped where the
+        // source changed. A chord whose two ends both lie ON another is the same structure, whatever
+        // their lengths; LONGEST FIRST, so the copy with the better-placed ends is the one kept.
         constexpr double PAIR_TOLERANCE = 100.0 / 40075017.0; // 100 m, in normalized world units
         {
-            std::vector<SpanUnion*> merged;
+            std::vector<SpanUnion*> resolved;
             for (auto it = spanUnions.begin(); it != spanUnions.end(); it++) {
-                if (!it->second.have0 || !it->second.have1) {
-                    continue;
+                if (it->second.have0 && it->second.have1) {
+                    resolved.push_back(&it->second);
                 }
+            }
+            std::stable_sort(resolved.begin(), resolved.end(), [](const SpanUnion* a, const SpanUnion* b) {
+                return cglib::norm(a->portal1 - a->portal0) > cglib::norm(b->portal1 - b->portal0);
+            });
+            std::vector<SpanUnion*> merged;
+            for (SpanUnion* span : resolved) {
                 double tolerance2 = PAIR_TOLERANCE * PAIR_TOLERANCE;
-                cglib::vec2<double> mid = (it->second.portal0 + it->second.portal1) * 0.5;
-                double length2 = cglib::norm(it->second.portal1 - it->second.portal0);
+                cglib::vec2<double> mid = (span->portal0 + span->portal1) * 0.5;
+                double length2 = cglib::norm(span->portal1 - span->portal0);
                 SpanUnion* match = nullptr;
                 for (SpanUnion* candidate : merged) {
+                    if (SpanGeometry::chordLiesOn(span->portal0, span->portal1, candidate->portal0, candidate->portal1)) {
+                        match = candidate;
+                        break;
+                    }
                     // Their ENDS are staggered - each carriageway's bridge is tagged over a slightly
                     // different chainage - but their middles and lengths are not.
                     cglib::vec2<double> candidateMid = (candidate->portal0 + candidate->portal1) * 0.5;
@@ -4633,10 +4644,10 @@ namespace massif::vt {
                     }
                 }
                 if (match) {
-                    it->second = *match; // one chord for both decks
+                    *span = *match; // one chord for both decks
                 }
                 else {
-                    merged.push_back(&it->second);
+                    merged.push_back(span);
                 }
             }
         }
