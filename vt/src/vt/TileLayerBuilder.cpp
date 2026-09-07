@@ -515,15 +515,10 @@ namespace massif::vt {
             _builderParameters.patternUsed[styleIndex] = patternUsed;
         }
 
-        return [type, style, transform, styleIndex, this](long long id, const VerticesList& rawVerticesList) {
+        return [type, style, transform, styleIndex, this](long long id, const VerticesList& verticesList) {
             std::size_t i0 = _coords.size();
-            bool span = style.elevationMode == LineElevationMode::SPAN && !rawVerticesList.empty() && !rawVerticesList.front().empty();
-            VerticesList verticesList = rawVerticesList;
-            if (span) {
-                verticesList.front() = subdivideSpanRing(rawVerticesList.front());
-            }
             tesselatePolygon(verticesList, static_cast<std::int8_t>(styleIndex), style);
-            if (span) {
+            if (style.elevationMode == LineElevationMode::SPAN && !verticesList.empty() && !verticesList.front().empty()) {
                 _spanInfos.fill(spanInfoForRing(verticesList.front(), id), _coords.size() - _spanInfos.size());
             }
             _ids.fill(id, _indices.size() - _ids.size());
@@ -537,17 +532,6 @@ namespace massif::vt {
                 }
             }
         };
-    }
-
-    TileLayerBuilder::Vertices TileLayerBuilder::subdivideSpanRing(const Vertices& ring) const {
-        // Metres per tile unit at this tile's latitude: the mercator stretch is 1/cos(lat).
-        double y = 0.5 - (_tileId.y + 0.5) / (1 << _tileId.zoom);
-        double tileMetres = 40075017.0 / (1 << _tileId.zoom) / std::cosh(6.283185307179586 * y);
-        Vertices squared = SpanGeometry::squareEnds(ring, static_cast<float>(SpanGeometry::END_BAND_METRES / tileMetres));
-        auto ends = SpanGeometry::endCentres(squared);
-        double spanMetres = cglib::length(ends.second - ends.first) * tileMetres;
-        double edgeMetres = std::max(SpanGeometry::SUBDIVISION_METRES, spanMetres / SpanGeometry::SUBDIVISION_MAX_EDGES);
-        return SpanGeometry::subdivideRing(squared, static_cast<float>(edgeMetres / tileMetres));
     }
 
     TileLayerBuilder::SpanVertexInfo TileLayerBuilder::spanInfoForRing(const Vertices& ring, long long id, float baseOffset) {
@@ -597,12 +581,8 @@ namespace massif::vt {
             _builderParameters.colorFuncs[styleIndex] = style.colorFunc;
         }
 
-        return [style, transform, invTransTransform, styleIndex, this](long long id, const VerticesList& rawVerticesList, float minHeight, float maxHeight) {
-            bool span = style.elevationMode == LineElevationMode::SPAN && !rawVerticesList.empty() && !rawVerticesList.front().empty();
-            VerticesList verticesList = rawVerticesList;
-            if (span) {
-                verticesList.front() = subdivideSpanRing(rawVerticesList.front());
-            }
+        return [style, transform, invTransTransform, styleIndex, this](long long id, const VerticesList& verticesList, float minHeight, float maxHeight) {
+            bool span = style.elevationMode == LineElevationMode::SPAN && !verticesList.empty() && !verticesList.front().empty();
             // A deck HANGS under the road it carries, so its min-height is negative - and a negative
             // vertex height cannot be drawn: polygon3DVsh takes the resolved base only where the
             // height is positive, so a negative one leaves the vertex on the terrain. Move the whole

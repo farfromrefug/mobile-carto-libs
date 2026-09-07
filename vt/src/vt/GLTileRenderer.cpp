@@ -5040,14 +5040,9 @@ namespace massif::vt {
                 allResolved = false;
                 continue;
             }
-            // The base from the vertex's own place along the chord, and that place itself,
-            // unclamped, for the shader to tell the deck past the portals (TileGeometry::chordOffset).
-            // A fill's or a deck's END BAND follows the ground UP where it is higher than the
-            // chord - the quay side of an abutment - and stays level where it is lower, the wall
-            // under it covering that side (SpanGeometry::endBandWeight).
-            double band = params.chordOffset >= 0
-                ? SpanGeometry::endBandFraction(cglib::length(w1 - w0) * 40075017.0 / std::cosh(6.283185307179586 * (w0(1) + w1(1)) * 0.5))
-                : 0.0;
+            // The base from the vertex's own place along the chord - a deck is FLAT, whatever the
+            // ground does at either side of its abutment - and that place itself, unclamped, for
+            // the shader to tell the deck past the portals (TileGeometry::chordOffset).
             auto resolveVertex = [&](std::size_t i) {
                 const std::uint8_t* vertex = vertexGeometry.data() + i * params.vertexSize;
                 const std::int16_t* pos = reinterpret_cast<const std::int16_t*>(vertex + params.coordOffset);
@@ -5055,11 +5050,6 @@ namespace massif::vt {
                 cglib::vec2<double> w = cglib::transform_point(cglib::vec2<double>(p(0), 1.0 - p(1)), tileMatrix);
                 double t = SpanGeometry::chordParamRaw(w, w0, w1);
                 double base = SpanGeometry::chordHeight(h0, h1, std::max(0.0, std::min(1.0, t)));
-                double weight = SpanGeometry::endBandWeight(t, band);
-                double ground = 0;
-                if (weight > 0 && _extrusionElevationProvider(cglib::vec3<double>(w(0), w(1), 0), spanSampleZoomAt(w, sourceTileId.zoom), false, ground) && ground > base) {
-                    base += weight * (ground - base);
-                }
                 geometry->setVertexBase(i, static_cast<float>(base + baseOffsetAt(w, record.baseOffset)));
                 geometry->setVertexChord(i, static_cast<float>(t));
                 patched[i] = true;
@@ -7271,6 +7261,10 @@ namespace massif::vt {
                     glUniform4fv(shaderProgram.uniforms[U_GROUNDDRAPETRANSFORM], 1, _pendingGroundDrapeTransform.data());
                 }
                 glUniform1f(shaderProgram.uniforms[U_GROUNDDRAPE], _pendingGroundDrape != 0 ? 1.0f : 0.0f);
+                // How far above the ground the overhang may sit and still be ground, in internal z
+                // units: the quay, not the water an outline reaches over (see polygon3DFsh).
+                double tileY = 0.5 - (targetTileId.y + 0.5) / (1 << targetTileId.zoom);
+                glUniform1f(shaderProgram.uniforms[U_SPANGROUNDTOLERANCE], static_cast<float>(SPAN_GROUND_TOLERANCE_METRES * _metersToInternal * std::cosh(6.283185307179586 * tileY)));
                 glActiveTexture(GL_TEXTURE0);
             }
             cglib::mat3x3<float> tileMatrix = cglib::mat3x3<float>::convert(cglib::inverse(calculateTileMatrix2D(targetTileId)) * calculateTileMatrix2D(sourceTileId));

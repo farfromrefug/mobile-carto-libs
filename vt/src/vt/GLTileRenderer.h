@@ -764,6 +764,7 @@ namespace massif::vt {
         std::map<TileId, GroundDrape> _groundDrapes;
         bool resolveGroundDrape(const TileId& targetTileId, GLuint& texture, cglib::vec4<float>& uvTransform) const;
         GLuint _pendingGroundDrape = 0; // the target tile's ground drape, for the roof past the portals
+        static constexpr double SPAN_GROUND_TOLERANCE_METRES = 1.5;
         cglib::vec4<float> _pendingGroundDrapeTransform = cglib::vec4<float>(0, 0, 1, 1);
         cglib::vec4<float> _pendingSpanDrapeTransform = cglib::vec4<float>(0, 0, 1, 1);
         // The body shared by bakeDrapeTile and bakeDrapeCoverage: the same covering tiles, the same

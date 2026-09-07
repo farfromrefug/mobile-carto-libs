@@ -41,6 +41,7 @@ namespace massif::vt {
         U_GROUNDDRAPETEXTURE,
         U_GROUNDDRAPETRANSFORM,
         U_GROUNDDRAPE,
+        U_SPANGROUNDTOLERANCE,
         U_SHADOWHEIGHTSCALE,
         U_EMISSIVE,
         U_COLORTABLE,
@@ -216,6 +217,7 @@ namespace massif::vt {
         { "uGroundDrapeTexture", U_GROUNDDRAPETEXTURE },
         { "uGroundDrapeTransform", U_GROUNDDRAPETRANSFORM },
         { "uGroundDrape", U_GROUNDDRAPE },
+        { "uSpanGroundTolerance", U_SPANGROUNDTOLERANCE },
         { "uFloatingBase",     U_FLOATINGBASE },
         { "uShadowHeightScale", U_SHADOWHEIGHTSCALE },
         { "uColorTable",       U_COLORTABLE },
@@ -2497,9 +2499,12 @@ namespace massif::vt {
         varying lowp float vSpanRoof;
         #endif
         #if defined(SPAN) && defined(TERRAIN)
-        // Where the vertex sits along the chord, unclamped: the deck is cut past the portals.
+        // Where the vertex sits along the chord, unclamped: past the portals the deck is ground.
         attribute float aVertexChord;
         varying highp_opt float vSpanChord;
+        // How far the vertex stands above the ground under it, in internal z units: the overhang
+        // wears the ground only where it lies on it.
+        varying mediump float vSpanAbove;
         #endif
 
         void main(void) {
@@ -2573,6 +2578,7 @@ namespace massif::vt {
         #endif
         #if defined(SPAN) && defined(TERRAIN)
             vSpanChord = aVertexChord;
+            vSpanAbove = (pos.z - groundZ) / max(uBaseScale, 1.0e-6);
         #endif
             gl_Position = applyDepthBias(uMVPMatrix * vec4(pos, 1.0));
         }
@@ -2599,9 +2605,11 @@ namespace massif::vt {
         uniform sampler2D uGroundDrapeTexture;
         uniform mediump vec4 uGroundDrapeTransform; // the target tile's share of the owner's drape texture
         uniform mediump float uGroundDrape;
+        uniform mediump float uSpanGroundTolerance;
         #endif
         #if defined(SPAN) && defined(TERRAIN)
         varying highp_opt float vSpanChord;
+        varying mediump float vSpanAbove;
         #endif
         #ifdef TERRAIN_SHADOW
         varying mediump vec3 vShadowNormal;
@@ -2669,8 +2677,12 @@ namespace massif::vt {
             // Past the baked bounds there is no road: nothing, not the clamped edge texel.
             draped *= step(0.0, drapeUV.x) * step(drapeUV.x, 1.0) * step(0.0, drapeUV.y) * step(drapeUV.y, 1.0);
         #if defined(SPAN) && defined(TERRAIN)
-            if (uGroundDrape > 0.5 && (vSpanChord < 0.0 || vSpanChord > 1.0)) {
-                draped = texture2D(uGroundDrapeTexture, spanUV * uGroundDrapeTransform.zw + uGroundDrapeTransform.xy);
+            // Past the portals the roof is ground where it LIES on the ground - the quay - and
+            // deck where it does not: an outline reaching over the bank carried the water up.
+            if (vSpanChord < 0.0 || vSpanChord > 1.0) {
+                draped = (uGroundDrape > 0.5 && vSpanAbove < uSpanGroundTolerance)
+                    ? texture2D(uGroundDrapeTexture, spanUV * uGroundDrapeTransform.zw + uGroundDrapeTransform.xy)
+                    : vec4(0.0);
             }
         #endif
         #endif
