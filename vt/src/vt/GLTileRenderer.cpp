@@ -182,6 +182,25 @@ namespace massif::vt {
         _terrainContentDepthShift = depthShift;
     }
 
+    void GLTileRenderer::setSpansEnabled(bool enabled) {
+        std::lock_guard<std::mutex> lock(_mutex);
+
+        if (_spansEnabled == enabled) {
+            return;
+        }
+        _spansEnabled = enabled;
+        // Turned off: forget every chord, so labels and decks stop asking, and let the next cull
+        // rebuild from nothing when turned on again.
+        _spanUnions.clear();
+        _spanChords.clear();
+        _spanChordCache.clear();
+        _spanDrapeBounds.clear();
+        _unresolvedSpanEnds.clear();
+        _spanUnionVersion.fetch_add(1, std::memory_order_relaxed);
+        invalidateExtrusionBases();
+        _pendingLabelElevationAll = true;
+    }
+
     void GLTileRenderer::setTerrainDrapeFills(bool enabled, bool includeLines) {
         std::lock_guard<std::mutex> lock(_mutex);
 
@@ -4391,6 +4410,9 @@ namespace massif::vt {
     }
 
     void GLTileRenderer::buildSpanUnions(const std::map<TileId, std::shared_ptr<const Tile>>& tiles, const std::vector<std::shared_ptr<const Tile>>& spanReferenceTiles) {
+        if (!_spansEnabled) {
+            return; // 3D bridges off: no unions, no chords, no reference tiles asked for
+        }
         // One piece of one span, in world coordinates. `portalN` marks an end the tile did NOT cut.
         struct SpanPiece {
             cglib::vec2<double> e0, e1;
@@ -4917,6 +4939,9 @@ namespace massif::vt {
         const std::vector<TileGeometry::SpanRecord>& spanRecords = geometry->getSpanRecords();
         if (params.baseOffset < 0 || spanRecords.empty() || !_extrusionElevationProvider) {
             return true; // not a span, or no elevation at all - the line stays on the ground
+        }
+        if (!_spansEnabled) {
+            return false; // 3D bridges off: never resolved, so a line drapes and a deck is not drawn
         }
         unsigned int version = _extrusionBaseVersion.load(std::memory_order_relaxed);
         unsigned int spanVersion = _spanUnionVersion.load(std::memory_order_relaxed);
@@ -5531,7 +5556,7 @@ namespace massif::vt {
     void GLTileRenderer::collectSpanDrapeTiles(std::map<TileId, std::size_t>& spanTiles) const {
         std::lock_guard<std::mutex> lock(_mutex);
 
-        if (_terrainPaint.enabled || !_visibleRenderTiles) {
+        if (_terrainPaint.enabled || !_visibleRenderTiles || !_spansEnabled) {
             return;
         }
         // ONLY the tiles that actually carry a bridge or a tunnel. A map with no span anywhere
@@ -6261,7 +6286,7 @@ namespace massif::vt {
         // painted on. The two meshes tesselate differently, so their interpolated depth disagrees
         // by float noise per fragment - a bridge apron over a river dissolves into the water it is
         // fighting. Draped it looks like the flat map, which is what the ground it sits on is.
-        if (!geometry->getSpanRecords().empty() && geometry->isBaseResolved()) {
+        if (_spansEnabled && !geometry->getSpanRecords().empty() && geometry->isBaseResolved()) {
             return false;
         }
         TileGeometry::Type type = geometry->getType();
@@ -7032,10 +7057,10 @@ namespace massif::vt {
             shaderProgramPtr = &buildShaderProgram("point", pointVsh, pointFsh, LightingMode::GEOMETRY2D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | (styleOffsetting ? OFFSET_FLAG : 0) | terrainFlag | (shadowReceiver ? shadowReceiverFlags() : 0) | lightFlag | fogFlag());
             break;
         case TileGeometry::Type::LINE:
-            shaderProgramPtr = &buildShaderProgram("line", lineVsh, lineFsh, LightingMode::GEOMETRY2D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | (styleOffsetting ? OFFSET_FLAG : 0) | (styleGapWidth ? GAPWIDTH_FLAG : 0) | (styleBlur ? BLUR_FLAG : 0) | terrainFlag | (shadowReceiver ? shadowReceiverFlags() : 0) | lightFlag | fogFlag() | coverageFlag() | drapeMaskFlag() | (!geometry->getSpanRecords().empty() ? SPAN_FLAG : 0));
+            shaderProgramPtr = &buildShaderProgram("line", lineVsh, lineFsh, LightingMode::GEOMETRY2D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | (styleOffsetting ? OFFSET_FLAG : 0) | (styleGapWidth ? GAPWIDTH_FLAG : 0) | (styleBlur ? BLUR_FLAG : 0) | terrainFlag | (shadowReceiver ? shadowReceiverFlags() : 0) | lightFlag | fogFlag() | coverageFlag() | drapeMaskFlag() | (_spansEnabled && !geometry->getSpanRecords().empty() ? SPAN_FLAG : 0));
             break;
         case TileGeometry::Type::POLYGON:
-            shaderProgramPtr = &buildShaderProgram("polygon", polygonVsh, polygonFsh, LightingMode::GEOMETRY2D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | terrainFlag | (shadowReceiver ? shadowReceiverFlags() : 0) | lightFlag | fogFlag() | coverageFlag() | drapeMaskFlag() | (!geometry->getSpanRecords().empty() ? SPAN_FLAG : 0));
+            shaderProgramPtr = &buildShaderProgram("polygon", polygonVsh, polygonFsh, LightingMode::GEOMETRY2D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | terrainFlag | (shadowReceiver ? shadowReceiverFlags() : 0) | lightFlag | fogFlag() | coverageFlag() | drapeMaskFlag() | (_spansEnabled && !geometry->getSpanRecords().empty() ? SPAN_FLAG : 0));
             break;
         case TileGeometry::Type::POLYGON3DGROUND:
             // Flat on the ground, so it takes the terrain displacement and the same clearance a
@@ -7063,8 +7088,8 @@ namespace massif::vt {
             {
                 GLuint spanDrapeTexture = 0;
                 cglib::vec4<float> spanDrapeTransform(0, 0, 1, 1);
-                bool spanDrape = !geometry->getSpanRecords().empty() && resolveSpanDrape(targetTileId, spanDrapeTexture, spanDrapeTransform);
-                shaderProgramPtr = &buildShaderProgram("polygon3d", polygon3DVsh, polygon3DFsh, LightingMode::GEOMETRY3D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | (terrainVTF ? TERRAIN_VTF_FLAG | TERRAIN_FLAG : 0) | (shadowReceiver ? shadowReceiverFlags() | SHADOW_SINGLE_TAP_FLAG | SHADOW_RECEIVER_3D_FLAG : 0) | (!geometry->getSpanRecords().empty() ? SPAN_FLAG : 0) | (spanDrape ? SPAN_DRAPE_FLAG : 0) | fogFlag());
+                bool spanDrape = _spansEnabled && !geometry->getSpanRecords().empty() && resolveSpanDrape(targetTileId, spanDrapeTexture, spanDrapeTransform);
+                shaderProgramPtr = &buildShaderProgram("polygon3d", polygon3DVsh, polygon3DFsh, LightingMode::GEOMETRY3D, RasterFilterMode::NONE, (styleParams.pattern ? PATTERN_FLAG : 0) | (styleParams.translate ? TRANSFORM_FLAG : 0) | (terrainVTF ? TERRAIN_VTF_FLAG | TERRAIN_FLAG : 0) | (shadowReceiver ? shadowReceiverFlags() | SHADOW_SINGLE_TAP_FLAG | SHADOW_RECEIVER_3D_FLAG : 0) | (_spansEnabled && !geometry->getSpanRecords().empty() ? SPAN_FLAG : 0) | (spanDrape ? SPAN_DRAPE_FLAG : 0) | fogFlag());
                 _pendingSpanDrape = spanDrape ? spanDrapeTexture : 0;
                 _pendingSpanDrapeTransform = spanDrapeTransform;
                 _pendingGroundDrape = spanDrape && resolveGroundDrape(targetTileId, _pendingGroundDrape, _pendingGroundDrapeTransform) ? _pendingGroundDrape : 0;

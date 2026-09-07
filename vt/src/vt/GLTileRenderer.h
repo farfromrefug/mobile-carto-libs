@@ -190,6 +190,11 @@ namespace massif::vt {
         // without being worth hundreds of metres at range, which is what leaks through ridges.
         void setTerrainLineClearance(float clearance);
         void setTerrainDrapeFills(bool enabled, bool includeLines);
+        // Whether span features (bridges, tunnels) stand on their chord. Off - the default - a span
+        // is draped like the ground, a span deck is not drawn, and nothing below runs: no unions,
+        // no chord reads, no span drape bakes, no reference tile requests. A map that never turns
+        // it on pays only the empty-records test every geometry already made.
+        void setSpansEnabled(bool enabled);
         void setTerrainDrapeResolution(int resolution);
         void setTerrainLighting(const TerrainLighting& lighting);
         // The contact shadow extrusions cast on the ground (POLYGON3DGROUND): how dark it goes
@@ -1047,6 +1052,7 @@ namespace massif::vt {
         int _terrainStyleLayersDrawn = 0;        // size of the order list above (the owner's dense numbering)
         bool _terrainDrapeFills = false;         // maplibre-style: bake polygon fills flat to a per-tile texture, sampled on the surface
         bool _terrainDrapeLines = false;         // also bake vt tile lines into the drape texture (softer, but zero leak/hug error)
+        bool _spansEnabled = false;              // 3D bridges (setSpansEnabled)
         int _drapeTextureSize = 512;             // per-tile drape texture resolution
         GLuint _drapeFBO = 0;                    // shared offscreen FBO for baking drape textures
         std::map<TileId, GLuint> _drapeTextures; // per-target-tile baked drape textures
